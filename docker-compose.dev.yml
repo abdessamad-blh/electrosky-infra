@@ -1,0 +1,27 @@
+version: '3.9'
+
+# Dev overrides — run with: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+# Access frontend at http://localhost:3000
+# Access backend at  http://localhost:4000
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma
+    command: npm run dev
+    environment:
+      NODE_ENV: development
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./frontend/src:/app/src
+    command: npm run dev
+    environment:
+      NODE_ENV: development

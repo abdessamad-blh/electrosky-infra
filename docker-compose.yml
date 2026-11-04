@@ -1,0 +1,123 @@
+# version: '3.9'
+
+networks:
+  electrosky_network:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  assistantdata:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-electrosky}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-electrosky_db}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - electrosky_network
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-electrosky}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Never publish a host port for Redis — the backend reaches it over electrosky_network.
+  # The default (passwordless) user is disabled; the app user can't run @dangerous
+  # commands (CONFIG, REPLICAOF, MODULE, FLUSHALL, KEYS…). INFO is re-allowed for ioredis.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --user
+      - default
+      - 'off'
+      - --user
+      - app
+      - 'on'
+      - '>${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}'
+      - '~*'
+      - '&*'
+      - '+@all'
+      - '-@dangerous'
+      - '+info'
+    volumes:
+      - redisdata:/data
+    networks:
+      - electrosky_network
+    healthcheck:
+      test: ['CMD', 'redis-cli', '--user', 'app', '--pass', '${REDIS_PASSWORD}', '--no-auth-warning', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - electrosky_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=3000
+    depends_on:
+      - backend
+    networks:
+      - electrosky_network
+
+  # AI shopping assistant (Mastra). Caddy routes electrosky.ma/assistant/* here.
+  # Only the variables it needs are passed — not the whole .env (no DB/JWT
+  # secrets in this container). Toggle with ASSISTANT_ENABLED in .env, then
+  # `docker compose up -d assistant` (no rebuild needed).
+  assistant:
+    build:
+      context: ./assistant
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      STORE_API_URL: http://backend:4000
+      STORE_PUBLIC_URL: ${FRONTEND_URL:-https://electrosky.ma}
+      MODEL_PRIMARY: ${ASSISTANT_MODEL_PRIMARY:-groq/openai/gpt-oss-120b}
+      MODEL_FALLBACK: ${ASSISTANT_MODEL_FALLBACK:-google/gemini-flash-latest}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY:-}
+      ASSISTANT_ENABLED: ${ASSISTANT_ENABLED:-true}
+      ASSISTANT_ORDER_LOOKUP: ${ASSISTANT_ORDER_LOOKUP:-false}
+      ASSISTANT_API_KEY: ${ASSISTANT_API_KEY:-}
+      RATE_LIMIT_PER_SESSION: ${ASSISTANT_RATE_LIMIT_PER_SESSION:-20}
+      RATE_LIMIT_PER_IP: ${ASSISTANT_RATE_LIMIT_PER_IP:-60}
+      DAILY_MESSAGE_LIMIT: ${ASSISTANT_DAILY_MESSAGE_LIMIT:-1000}
+      LOG_CONVERSATIONS: ${ASSISTANT_LOG_CONVERSATIONS:-true}
+    volumes:
+      - assistantdata:/app/data
+    depends_on:
+      - backend
+    networks:
+      - electrosky_network
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
